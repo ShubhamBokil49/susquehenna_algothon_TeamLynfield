@@ -1,0 +1,12 @@
+,value
+data_path,/Users/akhilmathur/Documents/Projects/susquehenna_algothon_TeamLynfield/prices.txt
+return_type,simple
+variance_target,0.98
+n_components_override,
+n_components_used,48
+variance_retained,0.9822355933524216
+whiten_pcs,False
+best_kmeans_k,2
+best_gmm_k,2
+bayesian_effective_components,1
+random_state,42

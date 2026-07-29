@@ -1,0 +1,4 @@
+model,silhouette,calinski_harabasz,davies_bouldin,number_of_states_used,number_of_switches,mean_run_length,median_run_length,maximum_run_length,isolated_run_fraction
+KMeans (k=2),0.1288436541410091,181.0163339658234,2.329816291989395,2,472,2.112050739957717,2.0,9,0.427061310782241
+GaussianMixture (k=2),0.11907276466916217,166.69676515064248,2.4183590726589625,2,482,2.0683229813664594,2.0,11,0.4451345755693582
+"BayesianGaussianMixture (used=1, weight-effective=1)",,,,1,0,999.0,999.0,999,0.0
