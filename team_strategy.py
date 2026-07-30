@@ -3,9 +3,9 @@
 Live engines
 ------------
 1. Optimised nonlinear 100-day cross-sectional reversal.
-2. Three rolling fair-value pairs:
-   AENO-NWIG, SMAH-ILVX, and EORC-NGTE.
+2. Filtered 13-pair rolling fair-value sleeve.
 3. One-day market-adjusted CUBO reversal.
+4. Regime-gated 10-day time-series momentum.
 
 The official evaluator calls getMyPosition(prcSoFar).
 The function returns desired TOTAL positions in integer shares, not trades.
@@ -25,12 +25,33 @@ DOLLAR_CAPS[0] = 100_000.0
 
 ALGO = 0
 AENO = 1
+ELLT = 4
+HETT = 7
+HUXZ = 8
 SMAH = 10
 EORC = 13
 CUBO = 14
+RTTH = 18
 NWIG = 20
+CTGI = 25
+ALUT = 26
+ACAC = 27
+ACIX = 31
+CCNS = 32
+MTNS = 33
+NAYO = 35
+FWWG = 36
+EELT = 37
+HRND = 38
+ULXY = 40
+BLBT = 41
+BENI = 42
+ITPA = 43
 NGTE = 45
 ILVX = 46
+FCSG = 47
+MHRM = 49
+EAFC = 50
 
 # Remove dedicated pair/CUBO assets from the broad cross-sectional sleeve so
 # the engines do not fight for the same capped positions.
@@ -39,6 +60,10 @@ DEDICATED = np.array(
     dtype=int,
 )
 CARVE_DEDICATED_FROM_CROSS_SECTION = True
+
+# HRND and ELLT were persistent broad-engine losers in the diagnostic pass.
+# They remain available to dedicated pair trading where applicable.
+BROAD_EXCLUDED = np.array([ELLT, HRND], dtype=int)
 
 
 # -----------------------------------------------------------------------------
@@ -55,9 +80,19 @@ CS_GROSS_TARGET = 600_000.0
 
 # Pair sleeve: (asset A, asset B, window, entry z, exit z, maximum hold)
 PAIR_CONFIGS = (
-    (AENO, NWIG, 250, 1.50, 0.25, 5),
-    (SMAH, ILVX, 300, 1.25, 0.50, 40),
-    (EORC, NGTE, 200, 1.00, 0.50, 10),
+    (SMAH, ILVX, 250, 1.00, 0.00, 40),
+    (AENO, NWIG, 250, 1.00, 0.00, 40),
+    (EORC, NGTE, 250, 1.00, 0.00, 40),
+    (HUXZ, ACAC, 250, 1.00, 0.00, 40),
+    (MHRM, EAFC, 250, 1.00, 0.00, 40),
+    (HETT, ULXY, 250, 1.00, 0.00, 40),
+    (CTGI, EELT, 250, 1.00, 0.00, 40),
+    (RTTH, NAYO, 250, 1.00, 0.00, 40),
+    (FWWG, BLBT, 250, 1.00, 0.00, 40),
+    (ACIX, ITPA, 250, 1.00, 0.00, 40),
+    (MTNS, BENI, 250, 1.00, 0.00, 40),
+    (ALUT, CCNS, 250, 1.00, 0.00, 40),
+    (NAYO, BLBT, 250, 1.00, 0.00, 40),
 )
 PAIR_GROSS_TARGET = 20_000.0
 
@@ -68,6 +103,23 @@ CUBO_VOL_WINDOW = 20
 CUBO_ENTRY = 0.75
 CUBO_RIDGE_ALPHA = 1.0
 CUBO_DOLLAR_CAP = 10_000.0
+
+# Regime-gated time-series momentum
+MOM_LOOKBACK = 10
+MOM_REBALANCE = 10
+
+# Fixed three-state Gaussian Markov model fitted only on days 0-799.
+# State order: neutral, bear, bull. Momentum is active only in neutral.
+HMM_TRANSITION = np.array([
+    [0.892378611, 0.0643955214, 0.0659306739],
+    [0.0644705831, 0.935603527, 0.000000685128457],
+    [0.0431508056, 0.000000951905668, 0.934068641],
+], dtype=float)
+HMM_MEANS = np.array([0.00503728789, -0.0411799858, 0.0577908314])
+HMM_VARIANCES = np.array([0.000190761901, 0.000382625094, 0.000665301737])
+HMM_INITIAL = np.array([0.37655522, 0.37699119, 0.24645359])
+HMM_NEUTRAL_STATE = 0
+HMM_TREND_LOOKBACK = 20
 
 EPS = 1e-12
 
@@ -148,6 +200,8 @@ def _cross_sectional_dollars_at_day(prices, day_index):
 
     if CARVE_DEDICATED_FROM_CROSS_SECTION:
         signal[DEDICATED] = 0.0
+
+    signal[BROAD_EXCLUDED] = 0.0
 
     return _signal_to_dollars(signal, CS_GROSS_TARGET)
 
@@ -287,7 +341,7 @@ def _advance_pair_states(log_prices, day_index, states):
 
 
 def _pair_dollars(states):
-    """Convert the three pair states into target dollar positions."""
+    """Convert all active pair states into target dollar positions."""
     target_dollars = np.zeros(N_INST, dtype=float)
 
     for state, config in zip(states, PAIR_CONFIGS):
@@ -390,6 +444,71 @@ def _cubo_dollars(returns):
 
 
 # -----------------------------------------------------------------------------
+# 4. Regime-gated 10-day time-series momentum
+# -----------------------------------------------------------------------------
+
+def _market_trend_feature(prices, day_index):
+    """20-day return of an equal-weight index built from daily asset returns."""
+    if day_index < HMM_TREND_LOOKBACK:
+        return np.nan
+
+    daily_returns = prices[:, 1:day_index + 1] / prices[:, :day_index] - 1.0
+    market_returns = np.mean(daily_returns, axis=0)
+    market_index = np.cumprod(1.0 + market_returns)
+
+    # market_index[k] corresponds to price day k + 1.
+    current = market_index[-1]
+    past_position = day_index - HMM_TREND_LOOKBACK - 1
+    past = 1.0 if past_position < 0 else market_index[past_position]
+    return current / past - 1.0
+
+
+def _hmm_filter_step(previous_probabilities, observation, first_observation=False):
+    """One forward-filter step for the fixed three-state Gaussian HMM."""
+    if first_observation:
+        predicted = HMM_INITIAL.copy()
+    else:
+        predicted = HMM_TRANSITION @ previous_probabilities
+
+    densities = np.exp(
+        -0.5 * (observation - HMM_MEANS) ** 2 / HMM_VARIANCES
+    ) / np.sqrt(2.0 * np.pi * HMM_VARIANCES)
+
+    filtered = predicted * densities
+    total = np.sum(filtered)
+
+    if not np.isfinite(total) or total <= EPS:
+        return predicted / np.sum(predicted)
+
+    return filtered / total
+
+
+def _replay_hmm(prices):
+    """Filter the market regime through all supplied price history."""
+    n_days = prices.shape[1]
+    probabilities = HMM_INITIAL.copy()
+    first = True
+
+    for day_index in range(HMM_TREND_LOOKBACK, n_days):
+        observation = _market_trend_feature(prices, day_index)
+        probabilities = _hmm_filter_step(probabilities, observation, first)
+        first = False
+
+    return probabilities, first
+
+
+def _momentum_dollars_at_day(prices, day_index):
+    """Full-cap 10-day momentum target, refreshed every ten price days."""
+    if day_index < MOM_LOOKBACK:
+        return np.zeros(N_INST, dtype=float)
+
+    performance = prices[:, day_index] / prices[:, day_index - MOM_LOOKBACK] - 1.0
+    target_dollars = np.sign(performance) * DOLLAR_CAPS
+    target_dollars[BROAD_EXCLUDED] = 0.0
+    return target_dollars
+
+
+# -----------------------------------------------------------------------------
 # Online state management
 # -----------------------------------------------------------------------------
 
@@ -408,10 +527,17 @@ def _initialise_cache(prices):
 
     pair_states = _replay_pair_states(np.log(prices))
 
+    momentum_day = last_day - (last_day % MOM_REBALANCE)
+    momentum_dollars = _momentum_dollars_at_day(prices, momentum_day)
+    hmm_probabilities, hmm_first = _replay_hmm(prices)
+
     CACHE.clear()
     CACHE["last_n_days"] = n_days
     CACHE["cross_sectional_dollars"] = cross_sectional_dollars
     CACHE["pair_states"] = pair_states
+    CACHE["momentum_dollars"] = momentum_dollars
+    CACHE["hmm_probabilities"] = hmm_probabilities
+    CACHE["hmm_first"] = hmm_first
 
 
 def _advance_cache(prices):
@@ -425,6 +551,20 @@ def _advance_cache(prices):
             CACHE["cross_sectional_dollars"] = (
                 _cross_sectional_dollars_at_day(prices, day_index)
             )
+
+        if day_index % MOM_REBALANCE == 0:
+            CACHE["momentum_dollars"] = _momentum_dollars_at_day(
+                prices, day_index
+            )
+
+        if day_index >= HMM_TREND_LOOKBACK:
+            observation = _market_trend_feature(prices, day_index)
+            CACHE["hmm_probabilities"] = _hmm_filter_step(
+                np.asarray(CACHE["hmm_probabilities"], dtype=float),
+                observation,
+                bool(CACHE["hmm_first"]),
+            )
+            CACHE["hmm_first"] = False
 
         _advance_pair_states(
             log_prices,
@@ -474,7 +614,13 @@ def getMyPosition(prcSoFar):
     pairs = _pair_dollars(CACHE["pair_states"])
     cubo = _cubo_dollars(returns)
 
-    target_dollars = cross_sectional + pairs + cubo
+    regime_state = int(np.argmax(CACHE["hmm_probabilities"]))
+    if regime_state == HMM_NEUTRAL_STATE:
+        momentum = np.asarray(CACHE["momentum_dollars"], dtype=float)
+    else:
+        momentum = np.zeros(N_INST, dtype=float)
+
+    target_dollars = cross_sectional + pairs + cubo + momentum
     target_dollars = np.clip(
         target_dollars,
         -DOLLAR_CAPS,
